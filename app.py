@@ -1,6 +1,6 @@
 import io
 import zipfile
-from flask import Flask, request, send_file, flash, render_template_string
+from flask import Flask, request, send_file, flash, render_template_string, make_response
 
 import fitz  # PyMuPDF
 
@@ -239,9 +239,104 @@ HTML_TEMPLATE = """
             color: var(--success-text);
             border: 1px solid #047857;
         }
+
+        /* Loading Overlay */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.4s ease;
+        }
+
+        .loading-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .loading-content {
+            text-align: center;
+            max-width: 400px;
+            padding: 2rem;
+        }
+
+        .loading-video-container {
+            position: relative;
+            width: 100%;
+            max-width: 320px;
+            margin: 0 auto 2rem;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .loading-content video {
+            width: 100%;
+            display: block;
+        }
+
+        .loading-text {
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--text-main);
+            margin-bottom: 0.5rem;
+        }
+
+        .loading-subtext {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .close-loading {
+            margin-top: 2rem;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: none;
+        }
+
+        .close-loading:hover {
+            background: rgba(255,255,255,0.2);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
     </style>
 </head>
 <body>
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-video-container">
+                <video id="loading-video" loop muted playsinline>
+                    <source src="/static/cutting-paper-machine.mp4" type="video/mp4">
+                </video>
+            </div>
+            <div class="loading-text animate-pulse">Processing your PDF...</div>
+            <div class="loading-subtext">This might take a few seconds depending on the file size.</div>
+            <button id="close-loading" class="close-loading">Close Overlay</button>
+        </div>
+    </div>
+
     <div class="container">
         <h1>PDF Splitter</h1>
         
@@ -255,7 +350,7 @@ HTML_TEMPLATE = """
             {% endif %}
         {% endwith %}
 
-        <form method="POST" enctype="multipart/form-data">
+        <form id="split-form" method="POST" enctype="multipart/form-data">
             
             <div class="form-group">
                 <div class="label-wrapper">
@@ -344,9 +439,63 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <button type="submit">Process & Download ZIP</button>
+            <button type="submit" id="submit-btn">Process & Download ZIP</button>
         </form>
     </div>
+
+    <script>
+        const form = document.getElementById('split-form');
+        const overlay = document.getElementById('loading-overlay');
+        const video = document.getElementById('loading-video');
+        const closeBtn = document.getElementById('close-loading');
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
+        form.onsubmit = function() {
+            // Check if form is valid before showing overlay
+            if (form.checkValidity()) {
+                overlay.classList.add('active');
+                video.play();
+                
+                // Clear any existing cookie
+                document.cookie = "fileDownload=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+
+                // Poll for the download cookie
+                const checkDownload = setInterval(() => {
+                    if (getCookie('fileDownload')) {
+                        // Clear the cookie
+                        document.cookie = "fileDownload=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+                        // Hide loading
+                        overlay.classList.remove('active');
+                        video.pause();
+                        clearInterval(checkDownload);
+                    }
+                }, 500);
+
+                // Fallback close button after 10 seconds
+                setTimeout(() => {
+                    closeBtn.style.display = 'inline-block';
+                }, 10000);
+            }
+        };
+
+        closeBtn.onclick = function() {
+            overlay.classList.remove('active');
+            video.pause();
+        };
+
+        // If page is shown from cache (back button), hide overlay
+        window.onpageshow = function(event) {
+            if (event.persisted) {
+                overlay.classList.remove('active');
+                video.pause();
+            }
+        };
+    </script>
 </body>
 </html>
 """
@@ -465,12 +614,14 @@ def index():
             # Point to start of ZIP in memory
             memory_zip_file.seek(0)
             
-            return send_file(
+            response = make_response(send_file(
                 memory_zip_file,
                 mimetype='application/zip',
                 as_attachment=True,
                 download_name='split_pdfs.zip'
-            )
+            ))
+            response.set_cookie('fileDownload', 'true', path='/')
+            return response
             
         except Exception as e:
             flash(f"An error occurred while processing the PDF: {str(e)}", "error")
